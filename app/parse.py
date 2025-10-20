@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    StaleElementReferenceException
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.support import expected_conditions as EC
@@ -28,7 +32,9 @@ _driver: WebDriver | None = None
 
 
 def get_driver() -> WebDriver:
-    return _driver  # caller must ensure driver is set
+    if _driver is None:
+        raise RuntimeError("Driver not set; call set_driver() first")
+    return _driver
 
 
 def set_driver(new_driver: WebDriver) -> None:
@@ -79,13 +85,32 @@ def load_all_products_on_page() -> None:
     driver = get_driver()
     while True:
         try:
-            more_btn = WebDriverWait(driver, 2).until(
+            more_btn = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((By.CLASS_NAME, "ecomerce-items-scroll-more"))
             )
-            more_btn.click()
-            time.sleep(0.5)
         except (TimeoutException, NoSuchElementException):
             break
+
+        prev_count = len(driver.find_elements(By.CLASS_NAME, "thumbnail"))
+
+        try:
+            more_btn.click()
+        except StaleElementReferenceException:
+            continue
+
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: len(d.find_elements(By.CLASS_NAME, "thumbnail")) > prev_count
+                          or _more_button_gone(more_btn)
+            )
+        except TimeoutException:
+            continue
+
+def _more_button_gone(more_btn) -> bool:
+    try:
+        return not more_btn.is_displayed()
+    except StaleElementReferenceException:
+        return True
 
 
 def scrape_page(url: str, page_name: str) -> list[Product]:
@@ -111,12 +136,26 @@ def save_to_csv(products: list[Product], filename: str) -> None:
             writer.writerow([p.title, p.description, p.price, p.rating, p.num_of_reviews])
 
 
-def get_all_products() -> None:
-    with webdriver.Chrome() as driver:
+def get_all_products(driver: WebDriver | None = None, options: webdriver.ChromeOptions | None = None) -> None:
+    if driver is not None:
         set_driver(driver)
         for page_name, page_url in PAGES.items():
             products = scrape_page(page_url, page_name)
             save_to_csv(products, f"{page_name}.csv")
+        return
+
+    if options is not None:
+        with webdriver.Chrome(options=options) as local_driver:
+            set_driver(local_driver)
+            for page_name, page_url in PAGES.items():
+                products = scrape_page(page_url, page_name)
+                save_to_csv(products, f"{page_name}.csv")
+    else:
+        with webdriver.Chrome() as local_driver:
+            set_driver(local_driver)
+            for page_name, page_url in PAGES.items():
+                products = scrape_page(page_url, page_name)
+                save_to_csv(products, f"{page_name}.csv")
 
 
 if __name__ == "__main__":
